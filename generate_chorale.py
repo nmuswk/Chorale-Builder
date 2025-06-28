@@ -1,5 +1,5 @@
 from music21 import stream, note, metadata, key, meter, clef
-
+#trigger build
 def build_chorale(output_name="chorale_output.xml"):
     score = stream.Score()
     score.metadata = metadata.Metadata()
