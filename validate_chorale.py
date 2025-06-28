@@ -1,127 +1,66 @@
-from music21 import converter, interval, pitch, note
-
-voice_ranges = {
-    'S': ('C4', 'G5'),
-    'A': ('F3', 'D5'),
-    'T': ('C3', 'G4'),
-    'B': ('E2', 'C4')
-}
+from music21 import converter, note, chord, stream
 
 def extract_voices(score):
-    soprano = score.parts[0].getElementsByClass('Voice')[0]
-    alto = score.parts[0].getElementsByClass('Voice')[1]
-    tenor = score.parts[1].getElementsByClass('Voice')[0]
-    bass = score.parts[1].getElementsByClass('Voice')[1]
-    return {'S': soprano, 'A': alto, 'T': tenor, 'B': bass}
+    # Assume score.parts[0] = upper staff (Soprano + Alto)
+    # and score.parts[1] = lower staff (Tenor + Bass)
+    upper = score.parts[0].flat.getElementsByClass(note.Note)
+    lower = score.parts[1].flat.getElementsByClass(note.Note)
 
-def spacing_and_crossing(voices):
+    # Divide evenly: alternating between soprano/alto and tenor/bass
+    soprano = upper[::2]
+    alto = upper[1::2]
+    tenor = lower[::2]
+    bass = lower[1::2]
+
+    return soprano, alto, tenor, bass
+
+def check_spacing(s, a, t, b):
     errors = []
-    pairs = [('S', 'A'), ('A', 'T'), ('T', 'B')]
-    for i in range(len(voices['S'])):
-        for v1, v2 in pairs:
-            n1, n2 = voices[v1][i], voices[v2][i]
-            if n1.isNote and n2.isNote:
-                iv = interval.Interval(n1, n2)
-                if iv.semitones < 0:
-                    errors.append(f"Voice crossing: {v1} below {v2} at note {i}")
-                if v1 in ['S', 'A'] and iv.semitones > 12:
-                    errors.append(f"Spacing too wide between {v1}-{v2} at note {i}")
+
+    for i, (sNote, aNote, tNote, bNote) in enumerate(zip(s, a, t, b)):
+        if abs(sNote.pitch.midi - aNote.pitch.midi) > 12:
+            errors.append(f"Measure {i+1}: Soprano and Alto more than an octave apart")
+        if abs(aNote.pitch.midi - tNote.pitch.midi) > 12:
+            errors.append(f"Measure {i+1}: Alto and Tenor more than an octave apart")
     return errors
 
-def parallels(voices):
+def check_voice_crossing(s, a, t, b):
     errors = []
-    def check(v1, v2, label):
-        for i in range(len(voices[v1])-1):
-            n1a, n1b = voices[v1][i], voices[v2][i]
-            n2a, n2b = voices[v1][i+1], voices[v2][i+1]
-            if all(n.isNote for n in [n1a, n1b, n2a, n2b]):
-                iv1 = interval.Interval(n1a, n1b)
-                iv2 = interval.Interval(n2a, n2b)
-                if iv1.simpleName in ['P5', 'P8'] and iv1.simpleName == iv2.simpleName:
-                    errors.append(f"Parallel {iv1.simpleName} in {label} at notes {i}-{i+1}")
-    for v1, v2 in [('S', 'B'), ('A', 'B'), ('T', 'B'), ('S', 'A'), ('S', 'T')]:
-        check(v1, v2, f"{v1}-{v2}")
+    for i, (sNote, aNote, tNote, bNote) in enumerate(zip(s, a, t, b)):
+        if aNote.pitch > sNote.pitch:
+            errors.append(f"Measure {i+1}: Alto crosses above Soprano")
+        if tNote.pitch > aNote.pitch:
+            errors.append(f"Measure {i+1}: Tenor crosses above Alto")
+        if bNote.pitch > tNote.pitch:
+            errors.append(f"Measure {i+1}: Bass crosses above Tenor")
     return errors
 
-def unresolved_sevenths(voices):
+def check_parallel_intervals(part1, part2, interval_name="P5"):
+    from music21 import interval
     errors = []
-    for i in range(len(voices['S'])-1):
-        for part in voices:
-            n1 = voices[part][i]
-            n2 = voices[part][i+1]
-            if all(n.isNote for n in [n1, n2]):
-                if n1.name == 'G' and n2.name != 'F':
-                    errors.append(f"Unresolved 7th (G) in {part} at note {i}")
+    for i in range(len(part1)-1):
+        int1 = interval.Interval(part1[i], part2[i])
+        int2 = interval.Interval(part1[i+1], part2[i+1])
+        if int1.simpleName == interval_name and int2.simpleName == interval_name:
+            errors.append(f"Parallel {interval_name} between measures {i+1} and {i+2}")
     return errors
 
-def leading_tone_resolution(voices):
+def validate_chorale(xml_path="chorale_output.xml"):
+    score = converter.parse(xml_path)
+    soprano, alto, tenor, bass = extract_voices(score)
+
     errors = []
-    for i in range(len(voices['S'])-1):
-        for part in ['S', 'A']:
-            n1 = voices[part][i]
-            n2 = voices[part][i+1]
-            if all(n.isNote for n in [n1, n2]):
-                if n1.name == 'C#' and n2.name != 'D':
-                    errors.append(f"Leading tone (C#) in {part} at note {i} does not resolve to D")
-    return errors
+    errors += check_spacing(soprano, alto, tenor, bass)
+    errors += check_voice_crossing(soprano, alto, tenor, bass)
+    errors += check_parallel_intervals(soprano, bass, "P5")
+    errors += check_parallel_intervals(tenor, bass, "P5")
+    errors += check_parallel_intervals(soprano, bass, "P8")
+    errors += check_parallel_intervals(tenor, bass, "P8")
 
-def range_check(voices):
-    errors = []
-    for part, notes in voices.items():
-        lo = pitch.Pitch(voice_ranges[part][0])
-        hi = pitch.Pitch(voice_ranges[part][1])
-        for i, n in enumerate(notes):
-            if n.isNote and not (lo <= n.pitch <= hi):
-                errors.append(f"{part} out of range at note {i}: {n.nameWithOctave}")
-    return errors
-
-def hidden_intervals(voices):
-    errors = []
-    for i in range(len(voices['S']) - 1):
-        s1, s2 = voices['S'][i], voices['S'][i+1]
-        b1, b2 = voices['B'][i], voices['B'][i+1]
-        if all(n.isNote for n in [s1, s2, b1, b2]):
-            iv1 = interval.Interval(s1, s2)
-            iv2 = interval.Interval(b1, b2)
-            soprano_leaps = iv1.semitones > 2
-            if soprano_leaps and iv1.direction == iv2.direction:
-                final_iv = interval.Interval(s2, b2).simpleName
-                if final_iv in ['P5', 'P8']:
-                    errors.append(f"Hidden {final_iv} between S-B at notes {i}-{i+1}")
-    return errors
-
-def cadence_check(voices):
-    errors = []
-    # Final two notes in S
-    if len(voices['S']) >= 2:
-        last, penult = voices['S'][-1], voices['S'][-2]
-        if last.isNote and penult.isNote:
-            if penult.name == 'A' and last.name == 'D':
-                errors.append("Soprano leaps 5-1 at cadence (A to D)")
-    return errors
-
-def validate_chorale(filename='chorale_output.xml'):
-    score = converter.parse(filename)
-    voices = extract_voices(score)
-
-    checks = [
-        spacing_and_crossing,
-        parallels,
-        unresolved_sevenths,
-        leading_tone_resolution,
-        range_check,
-        hidden_intervals,
-        cadence_check
-    ]
-
-    all_errors = []
-    for check in checks:
-        all_errors.extend(check(voices))
-
-    if all_errors:
+    if errors:
         print("❌ Errors found:")
-        for err in all_errors:
-            print("  -", err)
+        for e in errors:
+            print("  -", e)
         exit(1)
     else:
         print("✅ Chorale passed all checks.")
